@@ -359,6 +359,8 @@ app.get("/getgenes/:axies/all", function (req, res, next) {
 });
 
 app.get("/invalidateaxie/:axie", function (req, res, next) {
+  res.send(JSON.stringify({}));
+  return;
   let axie = req.params.axie;
   invalidateThroughLambdaPromise(axie)
     .then((result) => {
