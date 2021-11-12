@@ -6,6 +6,10 @@ const cluster = require("cluster");
 const clusterWorkerSize = os.cpus().length - 1;
 const port = 3000;
 
+const graphql = require("graphql-request");
+const gql = graphql.gql;
+const GraphQLClient = graphql.GraphQLClient;
+
 let totalCalls = 0;
 app.use(function (req, res, next) {
   res.setHeader("Content-type", "application/json");
@@ -60,18 +64,26 @@ app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
-async function getAxieDataFromLambdaPromise(axieId, timeout) {
+async function getAxieDataFromLambdaPromise(axieId) {
   return new Promise((resolve, reject) => {
-    let lambdaUrl = "1s9wo04jw3.execute-api.us-east-1.amazonaws.com";
+    const data = JSON.stringify({
+      operationName: "GetAxieDetail",
+      variables: {
+        axieId: "" + axieId,
+      },
+      query:
+        "query GetAxieDetail($axieId: ID!) {\n  axie(axieId: $axieId) {\n    ...AxieDetail\n    __typename\n  }\n}\n\nfragment AxieDetail on Axie {\n  id\n  name\n  genes\n  owner\n  birthDate\n  bodyShape\n  class\n  sireId\n  sireClass\n  matronId\n  matronClass\n  stage\n  title\n  breedCount\n  level\n  figure {\n    atlas\n    model\n    image\n    __typename\n  }\n  parts {\n    ...AxiePart\n    __typename\n  }\n  stats {\n    ...AxieStats\n    __typename\n  }\n  auction {\n    ...AxieAuction\n    __typename\n  }\n  ownerProfile {\n    name\n    __typename\n  }\n  children {\n    id\n    name\n    class\n    image\n    title\n    stage\n    __typename\n  }\n  __typename\n}\n\nfragment AxiePart on AxiePart {\n  id\n  name\n  class\n  type\n  stage\n  abilities {\n    ...AxieCardAbility\n    __typename\n  }\n  __typename\n}\n\nfragment AxieCardAbility on AxieCardAbility {\n  id\n  name\n  attack\n  defense\n  energy\n  description\n  backgroundUrl\n  effectIconUrl\n  __typename\n}\n\nfragment AxieStats on AxieStats {\n  hp\n  speed\n  skill\n  morale\n  __typename\n}\n\nfragment AxieAuction on Auction {\n  startingPrice\n  endingPrice\n  startingTimestamp\n  endingTimestamp\n  duration\n  timeLeft\n  currentPrice\n  currentPriceUSD\n  suggestedPrice\n  seller\n  listingIndex\n  __typename\n}\n",
+    });
+
     const options = {
-      hostname: lambdaUrl,
+      hostname: "graphql-gateway.axieinfinity.com",
       port: 443,
-      path: "/prod/getaxies/" + axieId,
-      method: "GET",
+      path: "/graphql?r=explorer",
+      method: "POST",
       headers: {
         "Content-Type": "application/json",
-      },
-      timeout: 50000,
+        "Content-Length": data.length,
+      }
     };
 
     const req = https.request(options, (res) => {
@@ -81,44 +93,24 @@ async function getAxieDataFromLambdaPromise(axieId, timeout) {
         data += d;
       });
 
-      res.on("end", async () => {
+      res.on("end", () => {
+        let doc = { message: "error" };
         try {
-          let doc = { message: "error" };
-
-          try {
-            doc = JSON.parse(data);
-          } catch (ex) {
-            //Nop.
-          }
-
-          if (
-            !doc ||
-            (doc.message &&
-              (doc.message.match(/.*error.*/i) ||
-                doc.message.match(/.*timed.*/i)))
-          ) {
-            // Try again.
-            resolve(await invalidateThroughLambdaPromise(axieId));
-            return;
-          }
-
-          resolve(doc);
+          //console.log("Text from axie:", data);
+          doc = JSON.parse(data);
+          //console.log("Parse from axie:", doc);
+          resolve(doc.data.axie);
         } catch (ex) {
-          console.log("Exception parsing data from axie,", ex, data);
-          resolve({ failed: true });
+          reject(doc);
         }
       });
     });
 
-    req.on("timeout", () => {
-      req.abort();
-      reject({ failed: true });
-    });
-
     req.on("error", (error) => {
-      console.log("Error in connection: ", error);
+      console.error(error);
     });
 
+    req.write(data);
     req.end();
   });
 }
@@ -220,47 +212,15 @@ async function getAxieGeneDataPromise(axieId, addAll) {
 }
 
 async function invalidateThroughLambdaPromise(axieId) {
-  return new Promise((resolve, reject) => {
-    let lambdaUrl = "1s9wo04jw3.execute-api.us-east-1.amazonaws.com";
-    const options = {
-      hostname: lambdaUrl,
-      port: 443,
-      path: "/prod/invalidateaxie/" + axieId,
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      timeout: 50000,
-    };
-
-    const req = https.request(options, (res) => {
-      var data = "";
-
-      res.on("data", (d) => {
-        data += d;
-      });
-
-      res.on("end", () => {
-        try {
-          let doc = JSON.parse(data);
-          resolve(doc);
-        } catch (ex) {
-          console.log("Exception parsing data from axie,", ex, data);
-          resolve({});
-        }
-      });
-    });
-
-    req.on("timeout", () => {
-      req.abort();
-      reject({});
-    });
-
-    req.on("error", (error) => {
-      console.error(error);
-    });
-
-    req.end();
+  return new Promise(async (res, rej) => {
+    try {
+      let doc = await getAxieDataFromLambdaPromise(axieId);
+      setDataInCache(axieId, doc);
+      res(doc);
+    } catch (ex) {
+      console.log("Invalidate Data Exception:", ex, axieId);
+      res({});
+    }
   });
 }
 
@@ -361,6 +321,9 @@ app.get("/getgenes/:axies/all", function (req, res, next) {
 app.get("/invalidateaxie/:axie", function (req, res, next) {
   res.send(JSON.stringify({}));
   return;
+});
+
+app.get("/xaxie/:axie", function (req, res, next) {
   let axie = req.params.axie;
   invalidateThroughLambdaPromise(axie)
     .then((result) => {
