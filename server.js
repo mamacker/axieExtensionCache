@@ -11,6 +11,7 @@ const gql = graphql.gql;
 const GraphQLClient = graphql.GraphQLClient;
 
 let totalCalls = 0;
+let axieIPs= {};
 app.use(function (req, res, next) {
   res.setHeader("Content-type", "application/json");
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -22,18 +23,70 @@ app.use(function (req, res, next) {
     "Access-Control-Allow-Headers",
     "Origin, X-Requested-With, Content-Type, Accept"
   );
+
   totalCalls++;
   if (totalCalls % 10000 == 0) {
     console.log("Total calls since reboot:", totalCalls);
   }
+
+  var ipAddress = req.header('x-forwarded-for') || req.connection.remoteAddress;
+  if (!axieIPs[ipAddress]) {
+    axieIPs[ipAddress] = 1;
+  }
+  axieIPs[ipAddress]++;
+
   next();
 });
 
 let cachedCalls = 0;
 
 let axieData = {};
+let axieCalls = {};
+let startTime = Date.now();
 function getAxieDataFromCache(id) {
+  if (!axieCalls[id])
+      axieCalls[id] = 0;
+
+  axieCalls[id]++;
   return axieData[id];
+}
+
+function getSortedHash(inputHash){
+  var resultHash = [];
+
+  var keys = Object.keys(inputHash);
+  keys.sort(function(a, b) {
+    if (inputHash[a] < inputHash[b]) return -1
+    if (inputHash[a] > inputHash[b]) return 1
+    return 0;
+  }).reverse().forEach(function(k) {
+    resultHash.push(k)
+  });
+  return resultHash;
+}
+
+function topIDCalls() {
+  let topSet = {};
+  let sHash = getSortedHash(axieCalls);
+  let count = 0;
+  for (let i = 0; i < sHash.length; i++) {
+    topSet[sHash[i]] = axieCalls[sHash[i]]
+    count++;
+    if (count > 100) break;
+  }
+  return topSet;
+}
+
+function topIPCalls() {
+  let topSet = {};
+  let sHash = getSortedHash(axieIPs);
+  let count = 0;
+  for (let i = 0; i < sHash.length; i++) {
+    topSet[sHash[i]] = axieIPs[sHash[i]]
+    count++;
+    if (count > 50) break;
+  }
+  return topSet;
 }
 
 function setDataInCache(id, doc) {
@@ -320,6 +373,25 @@ app.get("/getgenes/:axies/all", function (req, res, next) {
 
 app.get("/invalidateaxie/:axie", function (req, res, next) {
   res.send(JSON.stringify({}));
+
+  var ipAddress = req.header('x-forwarded-for') || req.connection.remoteAddress;
+  if (axieIPs[ipAddress] < 1000) {
+    let axie = req.params.axie;
+    // We no longer send results - in spite of invalidation.
+    invalidateThroughLambdaPromise(axie)
+      .then((result) => {
+        if (setDataInCache(axie, result)) {
+          process.send({
+            type: "invalidate",
+            axieid: axie,
+            doc: JSON.stringify(result),
+          });
+        }
+      })
+      .catch((ex) => {
+        console.log("Exception in invalidate promises.", ex);
+      });
+  }
   return;
 });
 
@@ -361,12 +433,13 @@ app.get("/bugged/:axie/:price", function (req, res, next) {
   });
 });
 
-
 app.get("/stats", (req, res, next) => {
   let finalData = {};
   finalData.clusterId = cluster.worker.id;
   finalData.totalCalls = totalCalls;
   finalData.cachedCalls = cachedCalls;
+  finalData.topIPs = topIPCalls();
+  finalData.upTimeHours = (Date.now() - startTime) / 1000 / 60 / 60 ;
   res.send(JSON.stringify(finalData, null, 2));
 });
 
