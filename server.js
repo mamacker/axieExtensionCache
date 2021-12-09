@@ -10,8 +10,12 @@ const graphql = require("graphql-request");
 const gql = graphql.gql;
 const GraphQLClient = graphql.GraphQLClient;
 
+let blackList = [
+];
+
 let totalCalls = 0;
 let axieIPs= {};
+let origins= {};
 app.use(function (req, res, next) {
   res.setHeader("Content-type", "application/json");
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -34,6 +38,21 @@ app.use(function (req, res, next) {
     axieIPs[ipAddress] = 1;
   }
   axieIPs[ipAddress]++;
+
+  let origin = req.header('origin');
+  if (!origins[origin]) {
+    origins[origin] = 1;
+  }
+  origins[origin]++;
+
+  if (origin != undefined && origin.startsWith("chrome-extension")) {
+    if (blackList.includes(origin)){
+      if (Math.random() * 100 > 30) {
+        res.send({});
+        return;
+      }
+    }
+  }
 
   next();
 });
@@ -91,7 +110,7 @@ function topIPCalls() {
 
 function setDataInCache(id, doc) {
   if (
-    !doc ||
+    !doc || Object.keys(doc).length == 0 ||
     (doc.message &&
       (doc.message.match(/.*error.*/i) || doc.message.match(/.*timed.*/i)))
   ) {
